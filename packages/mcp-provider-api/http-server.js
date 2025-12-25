@@ -1,8 +1,6 @@
 import express from 'express';
 import { spawn } from 'child_process';
 import cors from 'cors';
-import fs from 'fs/promises';
-import path from 'path';
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -12,109 +10,13 @@ const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY || 'nvapi-Xq48VqHkQ1pAF6GH1RRq
 const NVIDIA_API_BASE = 'https://integrate.api.nvidia.com/v1';
 const NVIDIA_MODEL = process.env.NVIDIA_MODEL || 'meta/llama-3.3-70b-instruct';
 
-// OPTIMIZED CACHING CONFIGURATION
-const SCHEMA_CACHE_TTL = parseInt(process.env.SCHEMA_CACHE_TTL) || 3600000; // 1 hour default
-const OBJECT_CACHE_TTL = parseInt(process.env.OBJECT_CACHE_TTL) || 7200000; // 2 hours for object details
-const CACHE_FILE_PATH = '/tmp/schema-cache.json'; // Persistent cache file
-const ENABLE_PERSISTENT_CACHE = process.env.ENABLE_PERSISTENT_CACHE !== 'false'; // Default true
-
-// In-memory cache
+// Cache for schema information
 let schemaCache = null;
 let schemaCacheTime = null;
-const objectFieldsCache = new Map(); // Cache for individual object fields
-let isRefreshing = false; // Flag to prevent concurrent refreshes
+const SCHEMA_CACHE_TTL = 3600000; // 1 hour
 
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
-
-// ============================================
-// CACHE MANAGEMENT
-// ============================================
-
-// Load cache from disk on startup
-async function loadCacheFromDisk() {
-  if (!ENABLE_PERSISTENT_CACHE) return;
-  
-  try {
-    const cacheData = await fs.readFile(CACHE_FILE_PATH, 'utf-8');
-    const parsed = JSON.parse(cacheData);
-    
-    // Check if cache is still valid
-    if (parsed.timestamp && (Date.now() - parsed.timestamp < SCHEMA_CACHE_TTL)) {
-      schemaCache = parsed.schema;
-      schemaCacheTime = parsed.timestamp;
-      console.log('✅ Loaded schema cache from disk (still valid)');
-    } else {
-      console.log('⚠️  Cache on disk expired, will refresh');
-    }
-  } catch (err) {
-    console.log('ℹ️  No valid cache file found, will fetch fresh');
-  }
-}
-
-// Save cache to disk
-async function saveCacheToDisk() {
-  if (!ENABLE_PERSISTENT_CACHE || !schemaCache) return;
-  
-  try {
-    const cacheData = {
-      schema: schemaCache,
-      timestamp: schemaCacheTime
-    };
-    await fs.writeFile(CACHE_FILE_PATH, JSON.stringify(cacheData, null, 2));
-    console.log('💾 Saved schema cache to disk');
-  } catch (err) {
-    console.error('Failed to save cache to disk:', err.message);
-  }
-}
-
-// Background refresh (non-blocking)
-async function refreshSchemaInBackground() {
-  if (isRefreshing) return;
-  
-  isRefreshing = true;
-  console.log('🔄 Background schema refresh started...');
-  
-  try {
-    const describeQuery = `SELECT QualifiedApiName, Label, IsCustom FROM EntityDefinition WHERE IsCustomizable = true ORDER BY IsCustom DESC, QualifiedApiName`;
-    const result = await executeMCPQuery(describeQuery);
-    
-    const objects = { standard: [], custom: [] };
-    
-    if (result.records) {
-      result.records.forEach(obj => {
-        const objInfo = {
-          apiName: obj.QualifiedApiName,
-          label: obj.Label,
-          isCustom: obj.IsCustom
-        };
-        
-        if (obj.IsCustom) {
-          objects.custom.push(objInfo);
-        } else {
-          objects.standard.push(objInfo);
-        }
-      });
-    }
-    
-    schemaCache = objects;
-    schemaCacheTime = Date.now();
-    await saveCacheToDisk();
-    
-    console.log(`✅ Background refresh complete: ${objects.standard.length} standard, ${objects.custom.length} custom objects`);
-  } catch (err) {
-    console.error('❌ Background refresh failed:', err.message);
-  } finally {
-    isRefreshing = false;
-  }
-}
-
-// Schedule periodic background refresh
-setInterval(() => {
-  if (schemaCache && (Date.now() - schemaCacheTime >= SCHEMA_CACHE_TTL)) {
-    refreshSchemaInBackground();
-  }
-}, 60000); // Check every minute
 
 // Health check
 app.get('/health', (req, res) => {
@@ -123,74 +25,7 @@ app.get('/health', (req, res) => {
     service: 'salesforce-mcp-provider',
     llmEnabled: !!NVIDIA_API_KEY,
     model: NVIDIA_MODEL,
-    cache: {
-      schemaLoaded: !!schemaCache,
-      schemaCacheAge: schemaCache ? Math.floor((Date.now() - schemaCacheTime) / 1000) : null,
-      schemaCacheTTL: Math.floor(SCHEMA_CACHE_TTL / 1000),
-      objectsCached: objectFieldsCache.size,
-      persistentCacheEnabled: ENABLE_PERSISTENT_CACHE
-    }
-  });
-});
-
-// ============================================
-// CACHE CONTROL ENDPOINTS
-// ============================================
-
-// Manual cache refresh
-app.post('/cache/refresh', async (req, res) => {
-  try {
-    schemaCache = null;
-    schemaCacheTime = null;
-    objectFieldsCache.clear();
-    
-    await refreshSchemaInBackground();
-    
-    res.json({ 
-      message: 'Cache refresh initiated',
-      note: 'Schema is being refreshed in the background'
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Clear cache
-app.post('/cache/clear', async (req, res) => {
-  schemaCache = null;
-  schemaCacheTime = null;
-  objectFieldsCache.clear();
-  
-  try {
-    if (ENABLE_PERSISTENT_CACHE) {
-      await fs.unlink(CACHE_FILE_PATH);
-    }
-  } catch (err) {
-    // File might not exist, that's ok
-  }
-  
-  res.json({ message: 'Cache cleared successfully' });
-});
-
-// Get cache stats
-app.get('/cache/stats', (req, res) => {
-  res.json({
-    schema: {
-      cached: !!schemaCache,
-      age: schemaCache ? Math.floor((Date.now() - schemaCacheTime) / 1000) : null,
-      ttl: Math.floor(SCHEMA_CACHE_TTL / 1000),
-      expiresIn: schemaCache ? Math.floor((SCHEMA_CACHE_TTL - (Date.now() - schemaCacheTime)) / 1000) : null,
-      objectCount: schemaCache ? (schemaCache.standard.length + schemaCache.custom.length) : 0
-    },
-    objectFields: {
-      cached: objectFieldsCache.size,
-      objects: Array.from(objectFieldsCache.keys())
-    },
-    config: {
-      schemaCacheTTL: SCHEMA_CACHE_TTL,
-      objectCacheTTL: OBJECT_CACHE_TTL,
-      persistentCacheEnabled: ENABLE_PERSISTENT_CACHE
-    }
+    schemaCached: !!schemaCache
   });
 });
 
@@ -198,7 +33,7 @@ app.get('/cache/stats', (req, res) => {
 // SCHEMA DISCOVERY
 // ============================================
 
-// Get Salesforce org schema (objects)
+// Get Salesforce org schema (objects and fields)
 app.get('/schema', async (req, res) => {
   try {
     const schema = await getOrgSchema();
@@ -212,7 +47,7 @@ app.get('/schema', async (req, res) => {
   }
 });
 
-// Get schema for specific object (with caching)
+// Get schema for specific object
 app.get('/schema/:objectName', async (req, res) => {
   try {
     const { objectName } = req.params;
@@ -397,7 +232,7 @@ app.post('/chat', async (req, res) => {
   }
 });
 
-// Generate SOQL query from natural language (with optimized caching)
+// Generate SOQL query from natural language (with dynamic schema)
 app.post('/generate-soql', async (req, res) => {
   try {
     if (!NVIDIA_API_KEY) {
@@ -412,16 +247,16 @@ app.post('/generate-soql', async (req, res) => {
       return res.status(400).json({ error: 'Question is required' });
     }
 
-    // Get org schema (from cache if available)
+    // Get org schema dynamically
     const schema = await getOrgSchema();
     const schemaDescription = formatSchemaForPrompt(schema);
 
-    // If object hint provided, get detailed schema (from cache if available)
+    // If object hint provided, get detailed schema for that object
     let detailedObjectInfo = '';
     if (objectHint) {
       try {
         const objectSchema = await getObjectSchema(objectHint);
-        detailedObjectInfo = `\n\nDetailed schema for ${objectHint}:\nFields: ${objectSchema.fields.map(f => `${f.apiName} (${f.dataType})`).join(', ')}`;
+        detailedObjectInfo = `\n\nDetailed schema for ${objectHint}:\n${JSON.stringify(objectSchema, null, 2)}`;
       } catch (err) {
         console.error('Failed to get object schema:', err);
       }
@@ -478,8 +313,7 @@ Otherwise, respond ONLY with the SOQL query. No explanations, no markdown, just 
     res.json({
       soql: result,
       originalQuestion: question,
-      needsClarification: false,
-      cacheHit: !!schemaCache && !!schemaCacheTime
+      needsClarification: false
     });
 
   } catch (error) {
@@ -506,7 +340,7 @@ app.post('/smart-query', async (req, res) => {
       return res.status(400).json({ error: 'Question is required' });
     }
 
-    // Step 1: Generate SOQL (uses cached schema)
+    // Step 1: Generate SOQL
     const soqlResponse = await fetch(`http://localhost:${PORT}/generate-soql`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -572,8 +406,7 @@ Please provide a clear, concise explanation of these results in natural language
       data: mcpResponse,
       explanation,
       recordCount: mcpResponse.records?.length || 0,
-      needsClarification: false,
-      cacheHit: soqlResult.cacheHit
+      needsClarification: false
     });
 
   } catch (error) {
@@ -586,7 +419,7 @@ Please provide a clear, concise explanation of these results in natural language
 });
 
 // ============================================
-// HELPER FUNCTIONS (OPTIMIZED)
+// HELPER FUNCTIONS
 // ============================================
 
 async function executeMCPQuery(soql) {
@@ -637,24 +470,22 @@ async function executeMCPQuery(soql) {
 }
 
 async function getOrgSchema() {
-  // Check in-memory cache first
+  // Check cache
   if (schemaCache && schemaCacheTime && (Date.now() - schemaCacheTime < SCHEMA_CACHE_TTL)) {
     return schemaCache;
   }
 
-  // If cache expired but we have old data, return it while refreshing in background
-  if (schemaCache && !isRefreshing) {
-    refreshSchemaInBackground(); // Non-blocking refresh
-    return schemaCache; // Return stale data immediately
-  }
-
-  // No cache at all, fetch synchronously
+  // Query for all objects using Global Describe
   const describeQuery = `SELECT QualifiedApiName, Label, IsCustom FROM EntityDefinition WHERE IsCustomizable = true ORDER BY IsCustom DESC, QualifiedApiName`;
   
   try {
     const result = await executeMCPQuery(describeQuery);
     
-    const objects = { standard: [], custom: [] };
+    // Group by standard and custom
+    const objects = {
+      standard: [],
+      custom: []
+    };
 
     if (result.records) {
       result.records.forEach(obj => {
@@ -674,7 +505,6 @@ async function getOrgSchema() {
 
     schemaCache = objects;
     schemaCacheTime = Date.now();
-    await saveCacheToDisk();
     
     return objects;
   } catch (err) {
@@ -684,7 +514,9 @@ async function getOrgSchema() {
       standard: [
         { apiName: 'Account', label: 'Account', isCustom: false },
         { apiName: 'Contact', label: 'Contact', isCustom: false },
-        { apiName: 'Opportunity', label: 'Opportunity', isCustom: false }
+        { apiName: 'Opportunity', label: 'Opportunity', isCustom: false },
+        { apiName: 'Lead', label: 'Lead', isCustom: false },
+        { apiName: 'Case', label: 'Case', isCustom: false }
       ],
       custom: []
     };
@@ -692,31 +524,15 @@ async function getOrgSchema() {
 }
 
 async function getObjectSchema(objectName) {
-  // Check cache first
-  const cacheKey = objectName;
-  const cached = objectFieldsCache.get(cacheKey);
-  
-  if (cached && (Date.now() - cached.timestamp < OBJECT_CACHE_TTL)) {
-    return cached.data;
-  }
-
-  // Fetch from Salesforce
+  // Get fields for specific object
   const fieldsQuery = `SELECT QualifiedApiName, Label, DataType FROM FieldDefinition WHERE EntityDefinition.QualifiedApiName = '${objectName}' ORDER BY QualifiedApiName`;
   
   try {
     const result = await executeMCPQuery(fieldsQuery);
-    const objectSchema = {
+    return {
       objectName,
       fields: result.records || []
     };
-    
-    // Cache it
-    objectFieldsCache.set(cacheKey, {
-      data: objectSchema,
-      timestamp: Date.now()
-    });
-    
-    return objectSchema;
   } catch (err) {
     throw new Error(`Failed to get schema for ${objectName}: ${err.message}`);
   }
@@ -725,6 +541,7 @@ async function getObjectSchema(objectName) {
 function formatSchemaForPrompt(schema) {
   let formatted = 'Available Salesforce Objects:\n\n';
   
+  // Standard objects
   if (schema.standard && schema.standard.length > 0) {
     formatted += 'STANDARD OBJECTS:\n';
     schema.standard.forEach(obj => {
@@ -732,6 +549,7 @@ function formatSchemaForPrompt(schema) {
     });
   }
   
+  // Custom objects
   if (schema.custom && schema.custom.length > 0) {
     formatted += '\nCUSTOM OBJECTS:\n';
     schema.custom.forEach(obj => {
@@ -743,6 +561,7 @@ function formatSchemaForPrompt(schema) {
 }
 
 async function fetchSalesforceContext(message) {
+  // Determine what context to fetch based on the message
   const messageLower = message.toLowerCase();
   let soql = 'SELECT Id, Name FROM Account LIMIT 5';
 
@@ -763,31 +582,19 @@ async function fetchSalesforceContext(message) {
 }
 
 // ============================================
-// STARTUP & SERVER
+// START SERVER
 // ============================================
-
-// Load cache on startup
-await loadCacheFromDisk();
-
-// Initial schema fetch if not cached
-if (!schemaCache) {
-  console.log('📥 No cache found, fetching schema...');
-  refreshSchemaInBackground();
-}
 
 app.listen(PORT, () => {
   console.log(`🚀 Salesforce MCP Provider running on port ${PORT}`);
   console.log(`📊 Available endpoints:`);
-  console.log(`   GET  /health         - Health check with cache stats`);
-  console.log(`   GET  /cache/stats    - Detailed cache statistics`);
-  console.log(`   POST /cache/refresh  - Manual cache refresh`);
-  console.log(`   POST /cache/clear    - Clear all caches`);
-  console.log(`   GET  /schema         - Get org schema (cached)`);
-  console.log(`   GET  /schema/:obj    - Get object schema (cached)`);
-  console.log(`   POST /chat           - Chat with LLM`);
-  console.log(`   POST /generate-soql  - Generate SOQL`);
-  console.log(`   POST /smart-query    - Smart query with explanation`);
+  console.log(`   GET  /health        - Health check`);
+  console.log(`   GET  /tools         - List available tools`);
+  console.log(`   GET  /schema        - Get org schema`);
+  console.log(`   GET  /schema/:obj   - Get object schema`);
+  console.log(`   POST /mcp           - Execute MCP commands`);
+  console.log(`   POST /chat          - Chat with LLM`);
+  console.log(`   POST /generate-soql - Generate SOQL from natural language`);
+  console.log(`   POST /smart-query   - Natural language query with explanation`);
   console.log(`🤖 LLM: ${NVIDIA_API_KEY ? `Enabled (${NVIDIA_MODEL})` : 'Disabled'}`);
-  console.log(`💾 Cache: Schema TTL=${SCHEMA_CACHE_TTL/1000}s, Object TTL=${OBJECT_CACHE_TTL/1000}s`);
-  console.log(`📁 Persistent Cache: ${ENABLE_PERSISTENT_CACHE ? 'Enabled' : 'Disabled'}`);
 });
