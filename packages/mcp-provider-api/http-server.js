@@ -592,7 +592,7 @@ Please provide a clear, concise explanation of these results in natural language
 async function executeMCPQuery(soql) {
   return new Promise((resolve, reject) => {
     // Path must point to where your MCP logic is built
-    const mcpPath = path.resolve(process.cwd(), '../../mcp/lib/index.js');
+   const mcpPath = path.resolve(process.cwd(), '../mcp/lib/index.js');
     
     const mcpProcess = spawn('node', [mcpPath], {
       env: { 
