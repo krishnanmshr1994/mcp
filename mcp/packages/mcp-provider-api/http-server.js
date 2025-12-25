@@ -234,7 +234,7 @@ app.get('/schema/:objectName', async (req, res) => {
 // Execute MCP commands
 app.post('/mcp', async (req, res) => {
   try {
-    const mcpProcess = spawn('node', ['dist/runtime.js'], {
+    const mcpProcess = spawn('node', ['dist/index.js'], {
       env: {
         ...process.env,
         SALESFORCE_LOGIN_URL: process.env.SALESFORCE_LOGIN_URL,
