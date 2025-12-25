@@ -591,53 +591,46 @@ Please provide a clear, concise explanation of these results in natural language
 
 async function executeMCPQuery(soql) {
   return new Promise((resolve, reject) => {
-    // Path must point to where your MCP logic is built
-   const mcpPath = path.resolve(process.cwd(), '../mcp/lib/index.js');
-    
-    const mcpProcess = spawn('node', [mcpPath], {
-      env: { 
+    const mcpProcess = spawn('node', ['dist/index.js'], {
+      env: {
         ...process.env,
-        // Force mapping to ensure the sub-process sees them
+        SALESFORCE_LOGIN_URL: process.env.SALESFORCE_LOGIN_URL,
         SALESFORCE_USERNAME: process.env.SALESFORCE_USERNAME,
         SALESFORCE_PASSWORD: process.env.SALESFORCE_PASSWORD,
-        SALESFORCE_SECURITY_TOKEN: process.env.SALESFORCE_SECURITY_TOKEN,
-        SALESFORCE_LOGIN_URL: process.env.SALESFORCE_LOGIN_URL || 'https://login.salesforce.com'
+        SALESFORCE_SECURITY_TOKEN: process.env.SALESFORCE_SECURITY_TOKEN
       }
     });
 
     let output = '';
-    let errorOutput = '';
 
     const request = {
       jsonrpc: '2.0',
       id: Date.now(),
       method: 'tools/call',
-      params: { name: 'query', arguments: { soql } }
+      params: {
+        name: 'query',
+        arguments: { soql }
+      }
     };
 
     mcpProcess.stdin.write(JSON.stringify(request) + '\n');
     mcpProcess.stdin.end();
 
-    mcpProcess.stdout.on('data', (data) => output += data.toString());
-    mcpProcess.stderr.on('data', (data) => errorOutput += data.toString());
+    mcpProcess.stdout.on('data', (data) => {
+      output += data.toString();
+    });
 
     mcpProcess.on('close', (code) => {
       if (code !== 0) {
-        console.error(`❌ MCP Auth/Query Error (Code ${code}): ${errorOutput}`);
-        return reject(new Error(errorOutput));
+        reject(new Error('MCP process failed'));
       }
       try {
         const lines = output.trim().split('\n').filter(l => l.trim());
-        const lastLine = JSON.parse(lines[lines.length - 1]);
-        
-        // Handle both .result and .result.content structures
-        const data = lastLine.result?.content?.[0]?.text 
-                     ? JSON.parse(lastLine.result.content[0].text) 
-                     : (lastLine.result || lastLine);
-                     
-        resolve(data);
+        const responses = lines.map(line => JSON.parse(line));
+        const result = responses[responses.length - 1];
+        resolve(result.result || result);
       } catch (e) {
-        reject(new Error(`Parse Error: ${e.message}. Raw: ${output}`));
+        reject(e);
       }
     });
   });
