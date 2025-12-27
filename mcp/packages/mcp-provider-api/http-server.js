@@ -1,6 +1,9 @@
 import express from 'express';
 import cors from 'cors';
 import jsforce from 'jsforce';
+import { spawn } from 'child_process';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -27,6 +30,56 @@ let sfConnection = null;
 
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
+
+// ============================================
+// MCP runtime child process (diagnostics + restart)
+// ============================================
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+let mcpChild = null;
+let mcpRestartAttempts = 0;
+const MCP_MAX_RESTARTS = 3;
+
+function startMcpProcess() {
+  try {
+    const runtimePath = path.join(__dirname, 'dist', 'runtime.js');
+    console.log('🔧 Starting MCP runtime:', runtimePath);
+
+    mcpChild = spawn(process.execPath, [runtimePath], {
+      env: process.env,
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+
+    mcpChild.stdout?.on('data', (chunk) => {
+      process.stdout.write(`[MCP stdout] ${chunk.toString()}`);
+    });
+
+    mcpChild.stderr?.on('data', (chunk) => {
+      process.stderr.write(`[MCP stderr] ${chunk.toString()}`);
+    });
+
+    mcpChild.on('error', (err) => {
+      console.error('❌ MCP child process error:', err && err.message ? err.message : err);
+    });
+
+    mcpChild.on('exit', (code, signal) => {
+      console.error(`❌ MCP child exited. code=${code} signal=${signal}`);
+      mcpChild = null;
+      mcpRestartAttempts++;
+      if (mcpRestartAttempts <= MCP_MAX_RESTARTS) {
+        console.log(`🔁 Restarting MCP runtime (attempt ${mcpRestartAttempts}/${MCP_MAX_RESTARTS})`);
+        setTimeout(startMcpProcess, 2000 * mcpRestartAttempts);
+      } else {
+        console.error('⛔ MCP runtime failed to start after multiple attempts');
+      }
+    });
+
+  } catch (err) {
+    console.error('❌ Failed to start MCP runtime:', err && err.message ? err.message : err);
+  }
+}
 
 // ============================================
 // SALESFORCE CONNECTION
@@ -423,6 +476,9 @@ try {
   console.error('\n❌ Initialization failed:', error.message);
   console.error('   Server will start but operations will fail until fixed.\n');
 }
+
+// Start MCP runtime child to provide the MCP protocol (diagnostics enabled)
+startMcpProcess();
 
 app.listen(PORT, () => {
   console.log(`\n${'='.repeat(60)}`);
