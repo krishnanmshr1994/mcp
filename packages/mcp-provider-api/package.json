@@ -1,7 +1,7 @@
 {
-  "name": "@salesforce/mcp-provider-api",
   "version": "0.4.1",
   "type": "module",
+  "license": "Apache-2.0",
   "main": "http-server.js",
   "dependencies": {
     "express": "^4.18.2",
@@ -10,5 +10,8 @@
   },
   "scripts": {
     "start": "node http-server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
