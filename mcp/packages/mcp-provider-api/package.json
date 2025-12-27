@@ -1,6 +1,5 @@
 {
   "name": "@salesforce/mcp-provider-api",
-  "description": "Salesforce MCP Provider with HTTP API and LLM integration",
   "version": "0.4.1",
   "type": "module",
   "license": "Apache-2.0",
@@ -12,8 +11,5 @@
   },
   "scripts": {
     "start": "node http-server.js"
-  },
-  "engines": {
-    "node": ">=18.0.0"
   }
 }

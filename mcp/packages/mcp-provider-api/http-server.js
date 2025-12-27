@@ -1,36 +1,29 @@
 import express from 'express';
 import cors from 'cors';
 import jsforce from 'jsforce';
-import fs from 'fs/promises';
 
 const app = express();
 const PORT = process.env.PORT || 8080;
 
-// NVIDIA LLM Configuration
+// Configuration
 const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY;
 const NVIDIA_API_BASE = 'https://integrate.api.nvidia.com/v1';
 const NVIDIA_MODEL = process.env.NVIDIA_MODEL || 'meta/llama-3.3-70b-instruct';
 
-// Salesforce Configuration
 const SF_LOGIN_URL = process.env.SALESFORCE_LOGIN_URL || 'https://login.salesforce.com';
 const SF_USERNAME = process.env.SALESFORCE_USERNAME;
 const SF_PASSWORD = process.env.SALESFORCE_PASSWORD;
 const SF_SECURITY_TOKEN = process.env.SALESFORCE_SECURITY_TOKEN || '';
 
-// Cache Configuration
-const SCHEMA_CACHE_TTL = parseInt(process.env.SCHEMA_CACHE_TTL) || 3600000; // 1 hour
-const OBJECT_CACHE_TTL = parseInt(process.env.OBJECT_CACHE_TTL) || 7200000; // 2 hours
-const CACHE_FILE_PATH = '/tmp/schema-cache.json';
-const ENABLE_PERSISTENT_CACHE = process.env.ENABLE_PERSISTENT_CACHE !== 'false';
-
-// Cache storage
+// Cache
 let schemaCache = null;
 let schemaCacheTime = null;
+const SCHEMA_CACHE_TTL = 3600000; // 1 hour
 const objectFieldsCache = new Map();
 let isRefreshing = false;
 
 // Salesforce connection
-let conn = null;
+let sfConnection = null;
 
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
@@ -39,44 +32,43 @@ app.use(express.json({ limit: '10mb' }));
 // SALESFORCE CONNECTION
 // ============================================
 
-async function getSalesforceConnection() {
-  // Return existing connection if valid
-  if (conn && conn.accessToken) {
+async function getConnection() {
+  // Return existing if valid
+  if (sfConnection && sfConnection.accessToken) {
     try {
-      // Test connection with a simple query
-      await conn.query('SELECT Id FROM User LIMIT 1');
-      return conn;
+      // Quick test
+      await sfConnection.identity();
+      return sfConnection;
     } catch (err) {
       console.log('⚠️  Connection expired, reconnecting...');
-      conn = null;
+      sfConnection = null;
     }
   }
 
-  // Create new connection
+  // Validate credentials
   if (!SF_USERNAME || !SF_PASSWORD) {
-    throw new Error('Salesforce credentials not configured. Please set SALESFORCE_USERNAME and SALESFORCE_PASSWORD environment variables.');
+    throw new Error('❌ Salesforce credentials missing! Set SALESFORCE_USERNAME and SALESFORCE_PASSWORD');
   }
 
-  console.log('🔐 Connecting to Salesforce...');
+  console.log('🔐 Authenticating with Salesforce...');
+  console.log(`   URL: ${SF_LOGIN_URL}`);
   console.log(`   Username: ${SF_USERNAME}`);
-  console.log(`   Login URL: ${SF_LOGIN_URL}`);
-
-  conn = new jsforce.Connection({
-    loginUrl: SF_LOGIN_URL
-  });
 
   try {
-    const fullPassword = SF_PASSWORD + SF_SECURITY_TOKEN;
-    await conn.login(SF_USERNAME, fullPassword);
+    sfConnection = new jsforce.Connection({ loginUrl: SF_LOGIN_URL });
     
-    console.log('✅ Salesforce connection established');
-    console.log(`   Org ID: ${conn.userInfo.organizationId}`);
-    console.log(`   User ID: ${conn.userInfo.id}`);
+    const password = SF_PASSWORD + SF_SECURITY_TOKEN;
+    const userInfo = await sfConnection.login(SF_USERNAME, password);
     
-    return conn;
+    console.log('✅ Salesforce authentication successful!');
+    console.log(`   Org ID: ${userInfo.organizationId}`);
+    console.log(`   User ID: ${userInfo.id}`);
+    
+    return sfConnection;
   } catch (error) {
     console.error('❌ Salesforce login failed:', error.message);
-    throw new Error(`Salesforce authentication failed: ${error.message}`);
+    sfConnection = null;
+    throw new Error(`Login failed: ${error.message}`);
   }
 }
 
@@ -84,158 +76,142 @@ async function getSalesforceConnection() {
 // SALESFORCE OPERATIONS
 // ============================================
 
-async function executeQuery(soql) {
-  const connection = await getSalesforceConnection();
-  console.log(`📊 Executing: ${soql.substring(0, 100)}...`);
+async function query(soql) {
+  const conn = await getConnection();
+  console.log(`📊 Query: ${soql.substring(0, 80)}...`);
   
   try {
-    const result = await connection.query(soql);
-    console.log(`✅ Query returned ${result.totalSize} records`);
+    const result = await conn.query(soql);
+    console.log(`✅ Returned ${result.totalSize} records`);
     return result;
   } catch (error) {
-    console.error('❌ Query failed:', error.message);
+    console.error(`❌ Query failed: ${error.message}`);
     throw error;
   }
 }
 
-async function createRecord(objectType, data) {
-  const connection = await getSalesforceConnection();
-  console.log(`➕ Creating ${objectType} record`);
-  
-  try {
-    const result = await connection.sobject(objectType).create(data);
-    console.log(`✅ Created record: ${result.id}`);
-    return result;
-  } catch (error) {
-    console.error('❌ Create failed:', error.message);
-    throw error;
-  }
+async function create(objectType, data) {
+  const conn = await getConnection();
+  return await conn.sobject(objectType).create(data);
 }
 
-async function updateRecord(objectType, id, data) {
-  const connection = await getSalesforceConnection();
-  console.log(`✏️  Updating ${objectType} record: ${id}`);
-  
-  try {
-    const result = await connection.sobject(objectType).update({ Id: id, ...data });
-    console.log(`✅ Updated record: ${id}`);
-    return result;
-  } catch (error) {
-    console.error('❌ Update failed:', error.message);
-    throw error;
-  }
+async function update(objectType, id, data) {
+  const conn = await getConnection();
+  return await conn.sobject(objectType).update({ Id: id, ...data });
 }
 
 async function deleteRecord(objectType, id) {
-  const connection = await getSalesforceConnection();
-  console.log(`🗑️  Deleting ${objectType} record: ${id}`);
-  
-  try {
-    const result = await connection.sobject(objectType).destroy(id);
-    console.log(`✅ Deleted record: ${id}`);
-    return result;
-  } catch (error) {
-    console.error('❌ Delete failed:', error.message);
-    throw error;
-  }
+  const conn = await getConnection();
+  return await conn.sobject(objectType).destroy(id);
 }
 
 // ============================================
-// CACHE MANAGEMENT
+// SCHEMA FUNCTIONS
 // ============================================
 
-async function loadCacheFromDisk() {
-  if (!ENABLE_PERSISTENT_CACHE) return;
+async function fetchSchema() {
+  console.log('🔄 Fetching org schema...');
   
   try {
-    const cacheData = await fs.readFile(CACHE_FILE_PATH, 'utf-8');
-    const parsed = JSON.parse(cacheData);
-    
-    if (parsed.timestamp && (Date.now() - parsed.timestamp < SCHEMA_CACHE_TTL)) {
-      schemaCache = parsed.schema;
-      schemaCacheTime = parsed.timestamp;
-      console.log('✅ Loaded schema cache from disk');
-    } else {
-      console.log('⚠️  Cached schema expired');
-    }
-  } catch (err) {
-    console.log('ℹ️  No cache file found');
-  }
-}
-
-async function saveCacheToDisk() {
-  if (!ENABLE_PERSISTENT_CACHE || !schemaCache) return;
-  
-  try {
-    await fs.writeFile(CACHE_FILE_PATH, JSON.stringify({
-      schema: schemaCache,
-      timestamp: schemaCacheTime
-    }, null, 2));
-    console.log('💾 Schema cache saved to disk');
-  } catch (err) {
-    console.error('⚠️  Failed to save cache:', err.message);
-  }
-}
-
-async function refreshSchemaInBackground() {
-  if (isRefreshing) return;
-  
-  isRefreshing = true;
-  console.log('🔄 Refreshing schema cache...');
-  
-  try {
-    const query = 'SELECT QualifiedApiName, Label, IsCustom FROM EntityDefinition WHERE IsCustomizable = true ORDER BY IsCustom DESC, QualifiedApiName LIMIT 200';
-    const result = await executeQuery(query);
+    const soql = 'SELECT QualifiedApiName, Label, IsCustom FROM EntityDefinition WHERE IsCustomizable = true ORDER BY IsCustom DESC, QualifiedApiName LIMIT 200';
+    const result = await query(soql);
     
     const objects = { standard: [], custom: [] };
     
     if (result && result.records) {
       result.records.forEach(obj => {
-        const objInfo = {
+        const info = {
           apiName: obj.QualifiedApiName,
           label: obj.Label,
           isCustom: obj.IsCustom
         };
         
         if (obj.IsCustom) {
-          objects.custom.push(objInfo);
+          objects.custom.push(info);
         } else {
-          objects.standard.push(objInfo);
+          objects.standard.push(info);
         }
       });
     }
     
     schemaCache = objects;
     schemaCacheTime = Date.now();
-    await saveCacheToDisk();
     
-    console.log(`✅ Schema refreshed: ${objects.standard.length} standard, ${objects.custom.length} custom objects`);
-  } catch (err) {
-    console.error('❌ Schema refresh failed:', err.message);
-  } finally {
-    isRefreshing = false;
+    console.log(`✅ Schema loaded: ${objects.standard.length} standard, ${objects.custom.length} custom objects`);
+    return objects;
+    
+  } catch (error) {
+    console.error('❌ Schema fetch failed:', error.message);
+    throw error;
   }
 }
 
-// Auto-refresh every minute if expired
-setInterval(() => {
-  if (schemaCache && (Date.now() - schemaCacheTime >= SCHEMA_CACHE_TTL)) {
-    refreshSchemaInBackground();
+async function getOrgSchema() {
+  // Return cache if valid
+  if (schemaCache && schemaCacheTime && (Date.now() - schemaCacheTime < SCHEMA_CACHE_TTL)) {
+    return schemaCache;
   }
-}, 60000);
+
+  // Fetch fresh
+  return await fetchSchema();
+}
+
+async function getObjectSchema(objectName) {
+  const cached = objectFieldsCache.get(objectName);
+  if (cached && (Date.now() - cached.timestamp < SCHEMA_CACHE_TTL)) {
+    return cached.data;
+  }
+
+  const soql = `SELECT QualifiedApiName, Label, DataType FROM FieldDefinition WHERE EntityDefinition.QualifiedApiName = '${objectName}' ORDER BY QualifiedApiName LIMIT 200`;
+  const result = await query(soql);
+  
+  const schema = {
+    objectName,
+    fields: result.records || []
+  };
+  
+  objectFieldsCache.set(objectName, {
+    data: schema,
+    timestamp: Date.now()
+  });
+  
+  return schema;
+}
+
+function formatSchema(schema) {
+  let text = 'STANDARD OBJECTS:\n';
+  schema.standard?.forEach(o => text += `- ${o.apiName} (${o.label})\n`);
+  
+  if (schema.custom?.length) {
+    text += '\nCUSTOM OBJECTS:\n';
+    schema.custom.forEach(o => text += `- ${o.apiName} (${o.label})\n`);
+  }
+  
+  return text;
+}
 
 // ============================================
 // API ENDPOINTS
 // ============================================
 
-app.get('/health', (req, res) => {
-  res.json({ 
+app.get('/health', async (req, res) => {
+  let sfStatus = 'Not connected';
+  
+  try {
+    if (sfConnection && sfConnection.accessToken) {
+      await sfConnection.identity();
+      sfStatus = 'Connected';
+    }
+  } catch (err) {
+    sfStatus = 'Connection lost';
+  }
+  
+  res.json({
     status: 'ok',
-    service: 'salesforce-mcp-provider',
     timestamp: new Date().toISOString(),
     salesforce: {
       configured: !!(SF_USERNAME && SF_PASSWORD),
-      connected: !!(conn && conn.accessToken),
+      status: sfStatus,
       username: SF_USERNAME || 'Not configured'
     },
     llm: {
@@ -245,59 +221,11 @@ app.get('/health', (req, res) => {
     cache: {
       loaded: !!schemaCache,
       ageSeconds: schemaCache ? Math.floor((Date.now() - schemaCacheTime) / 1000) : null,
-      ttlSeconds: Math.floor(SCHEMA_CACHE_TTL / 1000),
-      objectCount: schemaCache ? (schemaCache.standard.length + schemaCache.custom.length) : 0,
-      objectsCached: objectFieldsCache.size
-    }
-  });
-});
-
-// Cache control
-app.post('/cache/refresh', async (req, res) => {
-  try {
-    schemaCache = null;
-    schemaCacheTime = null;
-    objectFieldsCache.clear();
-    await refreshSchemaInBackground();
-    res.json({ message: 'Cache refresh initiated' });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.post('/cache/clear', async (req, res) => {
-  schemaCache = null;
-  schemaCacheTime = null;
-  objectFieldsCache.clear();
-  
-  try {
-    if (ENABLE_PERSISTENT_CACHE) {
-      await fs.unlink(CACHE_FILE_PATH).catch(() => {});
-    }
-  } catch (err) {
-    // Ignore errors
-  }
-  
-  res.json({ message: 'Cache cleared' });
-});
-
-app.get('/cache/stats', (req, res) => {
-  res.json({
-    schema: {
-      cached: !!schemaCache,
-      ageSeconds: schemaCache ? Math.floor((Date.now() - schemaCacheTime) / 1000) : null,
-      ttlSeconds: Math.floor(SCHEMA_CACHE_TTL / 1000),
-      expiresInSeconds: schemaCache ? Math.floor((SCHEMA_CACHE_TTL - (Date.now() - schemaCacheTime)) / 1000) : null,
       objectCount: schemaCache ? (schemaCache.standard.length + schemaCache.custom.length) : 0
-    },
-    objectFields: {
-      cached: objectFieldsCache.size,
-      objects: Array.from(objectFieldsCache.keys())
     }
   });
 });
 
-// Schema endpoints
 app.get('/schema', async (req, res) => {
   try {
     const schema = await getOrgSchema();
@@ -316,14 +244,13 @@ app.get('/schema/:objectName', async (req, res) => {
   }
 });
 
-// Salesforce operations
 app.post('/query', async (req, res) => {
   try {
     const { soql } = req.body;
     if (!soql) {
-      return res.status(400).json({ error: 'SOQL query is required' });
+      return res.status(400).json({ error: 'soql is required' });
     }
-    const result = await executeQuery(soql);
+    const result = await query(soql);
     res.json(result);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -333,10 +260,7 @@ app.post('/query', async (req, res) => {
 app.post('/create', async (req, res) => {
   try {
     const { objectType, data } = req.body;
-    if (!objectType || !data) {
-      return res.status(400).json({ error: 'objectType and data are required' });
-    }
-    const result = await createRecord(objectType, data);
+    const result = await create(objectType, data);
     res.json(result);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -346,10 +270,7 @@ app.post('/create', async (req, res) => {
 app.post('/update', async (req, res) => {
   try {
     const { objectType, id, data } = req.body;
-    if (!objectType || !id || !data) {
-      return res.status(400).json({ error: 'objectType, id, and data are required' });
-    }
-    const result = await updateRecord(objectType, id, data);
+    const result = await update(objectType, id, data);
     res.json(result);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -359,9 +280,6 @@ app.post('/update', async (req, res) => {
 app.post('/delete', async (req, res) => {
   try {
     const { objectType, id } = req.body;
-    if (!objectType || !id) {
-      return res.status(400).json({ error: 'objectType and id are required' });
-    }
     const result = await deleteRecord(objectType, id);
     res.json(result);
   } catch (error) {
@@ -369,11 +287,10 @@ app.post('/delete', async (req, res) => {
   }
 });
 
-// LLM endpoints
 app.post('/generate-soql', async (req, res) => {
   try {
     if (!NVIDIA_API_KEY) {
-      return res.status(503).json({ error: 'LLM not configured. Set NVIDIA_API_KEY environment variable.' });
+      return res.status(503).json({ error: 'LLM not configured' });
     }
 
     const { question, objectHint } = req.body;
@@ -382,31 +299,25 @@ app.post('/generate-soql', async (req, res) => {
     }
 
     const schema = await getOrgSchema();
-    const schemaDescription = formatSchemaForPrompt(schema);
+    const schemaText = formatSchema(schema);
 
-    let detailedObjectInfo = '';
+    let objectInfo = '';
     if (objectHint) {
       try {
-        const objectSchema = await getObjectSchema(objectHint);
-        detailedObjectInfo = `\n\nDetailed schema for ${objectHint}:\nFields: ${objectSchema.fields.map(f => `${f.QualifiedApiName} (${f.DataType})`).join(', ')}`;
+        const objSchema = await getObjectSchema(objectHint);
+        objectInfo = `\n\nFields for ${objectHint}:\n${objSchema.fields.map(f => `${f.QualifiedApiName} (${f.DataType})`).join(', ')}`;
       } catch (err) {
-        console.error('Failed to get object schema:', err);
+        console.error('Object schema error:', err);
       }
     }
 
-    const prompt = `You are a Salesforce SOQL expert. Convert this question into valid SOQL.
+    const prompt = `You are a Salesforce SOQL expert. Convert this question to SOQL.
 
-${schemaDescription}${detailedObjectInfo}
-
-RULES:
-1. If custom objects exist with similar names to standard objects, ask for clarification
-2. Custom objects/fields end with __c
-3. Use exact API names from schema
-4. If unsure, ask for clarification
+${schemaText}${objectInfo}
 
 Question: ${question}
 
-If clarification needed, respond: CLARIFICATION_NEEDED: [your question]
+If you need clarification, respond: CLARIFICATION_NEEDED: [question]
 Otherwise, respond ONLY with the SOQL query (no markdown, no explanations).`;
 
     const response = await fetch(`${NVIDIA_API_BASE}/chat/completions`, {
@@ -433,36 +344,23 @@ Otherwise, respond ONLY with the SOQL query (no markdown, no explanations).`;
     if (result.startsWith('CLARIFICATION_NEEDED:')) {
       return res.json({
         needsClarification: true,
-        question: result.replace('CLARIFICATION_NEEDED:', '').trim(),
-        originalQuestion: question
+        question: result.replace('CLARIFICATION_NEEDED:', '').trim()
       });
     }
 
     result = result.replace(/```sql\n?/g, '').replace(/```\n?/g, '').trim();
-    res.json({
-      soql: result,
-      originalQuestion: question,
-      needsClarification: false
-    });
+    res.json({ soql: result, needsClarification: false });
 
   } catch (error) {
-    console.error('SOQL generation error:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
 app.post('/smart-query', async (req, res) => {
   try {
-    if (!NVIDIA_API_KEY) {
-      return res.status(503).json({ error: 'LLM not configured' });
-    }
-
     const { question, objectHint } = req.body;
-    if (!question) {
-      return res.status(400).json({ error: 'question is required' });
-    }
 
-    // Step 1: Generate SOQL
+    // Generate SOQL
     const soqlRes = await fetch(`http://localhost:${PORT}/generate-soql`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -474,11 +372,11 @@ app.post('/smart-query', async (req, res) => {
       return res.json(soqlData);
     }
 
-    // Step 2: Execute query
-    const queryResult = await executeQuery(soqlData.soql);
+    // Execute
+    const queryResult = await query(soqlData.soql);
 
-    // Step 3: Get explanation
-    const llmResponse = await fetch(`${NVIDIA_API_BASE}/chat/completions`, {
+    // Explain
+    const llmRes = await fetch(`${NVIDIA_API_BASE}/chat/completions`, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${NVIDIA_API_KEY}`,
@@ -488,14 +386,14 @@ app.post('/smart-query', async (req, res) => {
         model: NVIDIA_MODEL,
         messages: [{
           role: 'user',
-          content: `User asked: "${question}"\n\nSOQL: ${soqlData.soql}\n\nResults (${queryResult.totalSize} records):\n${JSON.stringify(queryResult.records.slice(0, 5), null, 2)}\n\nProvide a clear explanation answering the user's question.`
+          content: `Question: "${question}"\nSOQL: ${soqlData.soql}\nResults: ${JSON.stringify(queryResult.records.slice(0, 5))}\n\nExplain the results clearly.`
         }],
         temperature: 0.7,
         max_tokens: 512
       })
     });
 
-    const llmData = await llmResponse.json();
+    const llmData = await llmRes.json();
 
     res.json({
       question,
@@ -506,155 +404,38 @@ app.post('/smart-query', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Smart query error:', error);
     res.status(500).json({ error: error.message });
   }
 });
-
-app.post('/chat', async (req, res) => {
-  try {
-    if (!NVIDIA_API_KEY) {
-      return res.status(503).json({ error: 'LLM not configured' });
-    }
-
-    const { message, conversationHistory = [], includeSchema = false } = req.body;
-    if (!message) {
-      return res.status(400).json({ error: 'message is required' });
-    }
-
-    let systemPrompt = 'You are a helpful Salesforce assistant. You can help with SOQL queries, data analysis, and Salesforce questions.';
-
-    if (includeSchema) {
-      const schema = await getOrgSchema();
-      systemPrompt += `\n\nAvailable objects:\n${formatSchemaForPrompt(schema)}`;
-    }
-
-    const messages = [
-      { role: 'system', content: systemPrompt },
-      ...conversationHistory,
-      { role: 'user', content: message }
-    ];
-
-    const response = await fetch(`${NVIDIA_API_BASE}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${NVIDIA_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: NVIDIA_MODEL,
-        messages,
-        temperature: 0.7,
-        max_tokens: 1024
-      })
-    });
-
-    const data = await response.json();
-    res.json({
-      response: data.choices[0].message.content,
-      model: NVIDIA_MODEL
-    });
-
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// ============================================
-// HELPER FUNCTIONS
-// ============================================
-
-async function getOrgSchema() {
-  // Return cached if valid
-  if (schemaCache && schemaCacheTime && (Date.now() - schemaCacheTime < SCHEMA_CACHE_TTL)) {
-    return schemaCache;
-  }
-
-  // Return stale cache while refreshing
-  if (schemaCache && !isRefreshing) {
-    refreshSchemaInBackground();
-    return schemaCache;
-  }
-
-  // Fetch fresh
-  const query = 'SELECT QualifiedApiName, Label, IsCustom FROM EntityDefinition WHERE IsCustomizable = true ORDER BY IsCustom DESC, QualifiedApiName LIMIT 200';
-  const result = await executeQuery(query);
-  
-  const objects = { standard: [], custom: [] };
-  if (result.records) {
-    result.records.forEach(obj => {
-      const info = { apiName: obj.QualifiedApiName, label: obj.Label, isCustom: obj.IsCustom };
-      if (obj.IsCustom) objects.custom.push(info);
-      else objects.standard.push(info);
-    });
-  }
-
-  schemaCache = objects;
-  schemaCacheTime = Date.now();
-  await saveCacheToDisk();
-  return objects;
-}
-
-async function getObjectSchema(objectName) {
-  const cached = objectFieldsCache.get(objectName);
-  if (cached && (Date.now() - cached.timestamp < OBJECT_CACHE_TTL)) {
-    return cached.data;
-  }
-
-  const query = `SELECT QualifiedApiName, Label, DataType FROM FieldDefinition WHERE EntityDefinition.QualifiedApiName = '${objectName}' ORDER BY QualifiedApiName LIMIT 200`;
-  const result = await executeQuery(query);
-  
-  const schema = { objectName, fields: result.records || [] };
-  objectFieldsCache.set(objectName, { data: schema, timestamp: Date.now() });
-  return schema;
-}
-
-function formatSchemaForPrompt(schema) {
-  let text = 'STANDARD OBJECTS:\n';
-  schema.standard?.forEach(o => text += `- ${o.apiName} (${o.label})\n`);
-  if (schema.custom?.length) {
-    text += '\nCUSTOM OBJECTS:\n';
-    schema.custom.forEach(o => text += `- ${o.apiName} (${o.label})\n`);
-  }
-  return text;
-}
 
 // ============================================
 // STARTUP
 // ============================================
 
-console.log('🚀 Starting Salesforce MCP Provider...');
+console.log('🚀 Starting Salesforce MCP Provider...\n');
 
-// Load cache
-await loadCacheFromDisk();
-
-// Test Salesforce connection
+// Test connection and load schema
 try {
-  await getSalesforceConnection();
-  
-  // Fetch schema if not cached
-  if (!schemaCache) {
-    console.log('📥 Fetching schema...');
-    await refreshSchemaInBackground();
-  }
+  await getConnection();
+  await fetchSchema();
+  console.log('\n✅ Server initialized successfully!');
 } catch (error) {
-  console.error('⚠️  Salesforce connection failed:', error.message);
-  console.error('   Server will start but Salesforce operations will fail until credentials are configured.');
+  console.error('\n❌ Initialization failed:', error.message);
+  console.error('   Server will start but operations will fail until fixed.\n');
 }
 
 app.listen(PORT, () => {
   console.log(`\n${'='.repeat(60)}`);
-  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`🌐 Server running at http://localhost:${PORT}`);
   console.log(`${'='.repeat(60)}`);
   console.log(`\n📊 Endpoints:`);
-  console.log(`   GET  /health - Health check`);
-  console.log(`   GET  /schema - Get org schema`);
-  console.log(`   POST /query - Execute SOQL`);
-  console.log(`   POST /generate-soql - Natural language → SOQL`);
-  console.log(`   POST /smart-query - Question → Answer`);
-  console.log(`   POST /chat - Chat with AI`);
+  console.log(`   GET  /health`);
+  console.log(`   GET  /schema`);
+  console.log(`   POST /query`);
+  console.log(`   POST /generate-soql`);
+  console.log(`   POST /smart-query`);
   console.log(`\n🔐 Salesforce: ${SF_USERNAME || 'NOT CONFIGURED'}`);
-  console.log(`🤖 LLM: ${NVIDIA_API_KEY ? 'ENABLED' : 'NOT CONFIGURED'}`);
-  console.log(`💾 Cache: ${schemaCache ? `${schemaCache.standard.length + schemaCache.custom.length} objects` : 'Empty'}`);
-  console.log(`\n${'='.repeat(60)}\n`);
+  console.log(`🤖 NVIDIA LLM: ${NVIDIA_API_KEY ? 'ENABLED' : 'NOT CONFIGURED'}`);
+  console.log(`💾 Schema: ${schemaCache ? `${schemaCache.standard.length + schemaCache.custom.length} objects cached` : 'Not loaded'}`);
+  console.log(`${'='.repeat(60)}\n`);
 });
