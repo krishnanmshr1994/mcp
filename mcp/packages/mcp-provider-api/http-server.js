@@ -663,17 +663,12 @@ console.log('🚀 Starting Salesforce MCP Provider...');
 await loadCacheFromDisk();
 
 // Test Salesforce connection
-try {
-  await getSalesforceConnection();
+await getSalesforceConnection();
   
-  // Fetch schema if not cached
-  if (!schemaCache) {
-    console.log('📥 Fetching schema...');
-    await refreshSchemaInBackground();
-  }
-} catch (error) {
-  console.error('⚠️  Salesforce connection failed:', error.message);
-  console.error('   Server will start but Salesforce operations will fail until credentials are configured.');
+// Fetch schema if not cached
+if (!schemaCache) {
+  console.log('📥 Fetching schema...');
+  await refreshSchemaInBackground();
 }
 
 app.listen(PORT, () => {
