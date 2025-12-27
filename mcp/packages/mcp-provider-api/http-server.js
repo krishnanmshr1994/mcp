@@ -40,24 +40,52 @@ app.use(express.json({ limit: '10mb' }));
 // ============================================
 
 async function getSalesforceConnection() {
-  // Return existing connection if valid
+  // Return existing valid connection if possible
   if (conn && conn.accessToken) {
     try {
-      // Test connection with a simple query
+      // Quick test query to confirm connection is still alive
       await conn.query('SELECT Id FROM User LIMIT 1');
       return conn;
     } catch (err) {
-      console.log('⚠️  Connection expired, reconnecting...');
-      conn = null;
+      console.log('⚠️  Existing connection expired or invalid, reconnecting...');
+      conn = null; // Force reconnection
     }
   }
 
-  // Create new connection
-  if (!SF_USERNAME || !SF_PASSWORD) {
-    throw new Error('Salesforce credentials not configured. Please set SALESFORCE_USERNAME and SALESFORCE_PASSWORD environment variables.');
+  // === PRIORITY 1: Use pre-authenticated access token (recommended) ===
+  const accessToken = process.env.SALESFORCE_ACCESS_TOKEN?.trim();
+  const instanceUrl = process.env.SALESFORCE_INSTANCE_URL?.trim().replace(/\/$/, ''); // Remove trailing slash
+
+  if (accessToken && instanceUrl) {
+    console.log('🔐 Attempting Salesforce connection using pre-authenticated access token');
+    console.log(`   Instance URL: ${instanceUrl}`);
+
+    conn = new jsforce.Connection({
+      instanceUrl: instanceUrl,
+      accessToken: accessToken
+    });
+
+    // No need to call login() — initialize is enough with token
+    try {
+      // Test the connection with a lightweight query
+      await conn.query('SELECT Id FROM User LIMIT 1');
+      console.log('✅ Salesforce token-based connection established successfully');
+      return conn;
+    } catch (error) {
+      console.error('❌ Token-based authentication failed:', error.message);
+      console.error('   Possible causes: expired token, wrong instance URL, or insufficient permissions');
+      conn = null;
+      // Do NOT fall back to username/password automatically — token should be valid
+      throw new Error(`Token authentication failed: ${error.message}`);
+    }
   }
 
-  console.log('🔐 Connecting to Salesforce...');
+  // === FALLBACK: Original username/password method (legacy) ===
+  if (!SF_USERNAME || !SF_PASSWORD) {
+    throw new Error('Salesforce credentials not configured. Please set SALESFORCE_USERNAME and SALESFORCE_PASSWORD (or use token auth).');
+  }
+
+  console.log('🔐 Falling back to username/password authentication...');
   console.log(`   Username: ${SF_USERNAME}`);
   console.log(`   Login URL: ${SF_LOGIN_URL}`);
 
@@ -66,16 +94,17 @@ async function getSalesforceConnection() {
   });
 
   try {
-    const fullPassword = SF_PASSWORD + SF_SECURITY_TOKEN;
+    const fullPassword = SF_PASSWORD + (SF_SECURITY_TOKEN || '');
     await conn.login(SF_USERNAME, fullPassword);
     
-    console.log('✅ Salesforce connection established');
+    console.log('✅ Salesforce username/password connection established');
     console.log(`   Org ID: ${conn.userInfo.organizationId}`);
     console.log(`   User ID: ${conn.userInfo.id}`);
     
     return conn;
   } catch (error) {
     console.error('❌ Salesforce login failed:', error.message);
+    conn = null;
     throw new Error(`Salesforce authentication failed: ${error.message}`);
   }
 }
