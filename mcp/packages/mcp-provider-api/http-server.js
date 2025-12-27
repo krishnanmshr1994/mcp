@@ -659,18 +659,28 @@ function formatSchemaForPrompt(schema) {
 
 console.log('🚀 Starting Salesforce MCP Provider...');
 
-// Load cache
+// Load cache first
 await loadCacheFromDisk();
 
-// Test Salesforce connection
-await getSalesforceConnection();
-  
-// Fetch schema if not cached
+// FORCE CONNECTION NOW - WILL CRASH IF FAILS
+console.log('=== FORCING SALESFORCE CONNECTION ===');
+try {
+  await getSalesforceConnection();
+  console.log('=== SALESFORCE CONNECTION SUCCESSFUL ===');
+} catch (err) {
+  console.error('=== SALESFORCE CONNECTION FAILED ===');
+  console.error(err.message);
+  console.error('Server cannot start without Salesforce connection');
+  process.exit(1);  // Crash the process - Render will show full error
+}
+
+// Only proceed if connection worked
 if (!schemaCache) {
-  console.log('📥 Fetching schema...');
+  console.log('📥 Fetching initial schema...');
   await refreshSchemaInBackground();
 }
 
+// Start server
 app.listen(PORT, () => {
   console.log(`\n${'='.repeat(60)}`);
   console.log(`🚀 Server running on port ${PORT}`);
@@ -682,7 +692,7 @@ app.listen(PORT, () => {
   console.log(`   POST /generate-soql - Natural language → SOQL`);
   console.log(`   POST /smart-query - Question → Answer`);
   console.log(`   POST /chat - Chat with AI`);
-  console.log(`\n🔐 Salesforce: ${SF_USERNAME || 'NOT CONFIGURED'}`);
+  console.log(`\n🔐 Salesforce: CONNECTED`);
   console.log(`🤖 LLM: ${NVIDIA_API_KEY ? 'ENABLED' : 'NOT CONFIGURED'}`);
   console.log(`💾 Cache: ${schemaCache ? `${schemaCache.standard.length + schemaCache.custom.length} objects` : 'Empty'}`);
   console.log(`\n${'='.repeat(60)}\n`);
