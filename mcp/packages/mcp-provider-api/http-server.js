@@ -40,6 +40,7 @@ app.use(express.json({ limit: '10mb' }));
 // ============================================
 
 async function getSalesforceConnection() {
+  console.log(`in getSalesforceConnection`);
   // Return existing valid connection if possible
   if (conn && conn.accessToken) {
     try {
