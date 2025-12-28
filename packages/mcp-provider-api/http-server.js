@@ -532,64 +532,119 @@ Otherwise, respond ONLY with the valid SOQL query (no markdown, no explanations,
 });
 
 app.post('/smart-query', async (req, res) => {
-  console.log('🔍 POST /smart-query called');
-  try {
-    if (!NVIDIA_API_KEY) {
-      return res.status(503).json({ error: 'LLM not configured' });
+    console.log('🔍 POST /smart-query (Agentic) called');
+    try {
+        if (!NVIDIA_API_KEY) {
+            return res.status(503).json({ error: 'LLM not configured' });
+        }
+
+        const { question } = req.body;
+        if (!question) {
+            return res.status(400).json({ error: 'question is required' });
+        }
+
+        // 1. Get current Object list for context
+        const schema = await getOrgSchema();
+        const objectList = [...schema.standard, ...schema.custom].map(o => `${o.apiName} (${o.label})`).join(', ');
+
+        // 2. Step 1: Orchestration - Decide the path
+        const orchestratorRes = await fetch(`${NVIDIA_API_BASE}/chat/completions`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${NVIDIA_API_KEY}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                model: NVIDIA_MODEL,
+                messages: [{
+                    role: 'system',
+                    content: `You are a Salesforce Orchestrator. Available Objects: ${objectList}.
+                    Based on the question, respond with ONE of these formats:
+                    - 'FETCH: [ObjectAPIName]' if you need fields to query records or explain structure.
+                    - 'CLARIFY: [Obj1], [Obj2]' if the entity (e.g., Tesla) exists in multiple objects.
+                    - 'ANSWER: [Response]' for general knowledge, troubleshooting advice (access/permissions), or simple help.`
+                }, { role: 'user', content: question }],
+                temperature: 0.1
+            })
+        });
+
+        const orchData = await orchestratorRes.json();
+        const decision = orchData.choices[0].message.content.trim();
+        console.log(`🤖 Orchestrator Decision: ${decision}`);
+
+        // --- BRANCH A: Direct Answer (General/Troubleshooting) ---
+        if (decision.startsWith('ANSWER:')) {
+            return res.json({
+                question,
+                explanation: decision.replace('ANSWER:', '').trim(),
+                type: 'general'
+            });
+        }
+
+        // --- BRANCH B: Ambiguity Handling ---
+        if (decision.startsWith('CLARIFY:')) {
+            const options = decision.replace('CLARIFY:', '').split(',').map(s => s.trim());
+            return res.json({
+                question,
+                needsClarification: true,
+                options,
+                type: 'clarification'
+            });
+        }
+
+        // --- BRANCH C: Deep Data Thinking (Fetch + Query) ---
+        if (decision.startsWith('FETCH:')) {
+            const targetObject = decision.replace('FETCH:', '').trim();
+            console.log(`📡 Agent fetching fields for: ${targetObject}`);
+
+            // Generate SOQL (this will trigger getObjectSchema internally in your generate-soql logic)
+            const soqlRes = await fetch(`http://localhost:${PORT}/generate-soql`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ question, objectHint: targetObject })
+            });
+
+            const soqlData = await soqlRes.json();
+            if (soqlData.needsClarification) return res.json(soqlData);
+
+            // Execute Query
+            const queryResult = await query(soqlData.soql);
+
+            // Final Summary Explanation
+            const summaryRes = await fetch(`${NVIDIA_API_BASE}/chat/completions`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${NVIDIA_API_KEY}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    model: NVIDIA_MODEL,
+                    messages: [{
+                        role: 'user',
+                        content: `User Question: "${question}"\nData Found: ${JSON.stringify(queryResult.records.slice(0, 5))}\n\nProvide a natural language summary of the results.`
+                    }],
+                    temperature: 0.5
+                })
+            });
+
+            const summaryData = await summaryRes.json();
+
+            return res.json({
+                question,
+                soql: soqlData.soql,
+                data: queryResult,
+                explanation: summaryData.choices[0].message.content,
+                type: 'data_query'
+            });
+        }
+
+        // Fallback if the LLM format is weird
+        throw new Error("Unexpected orchestrator response format");
+
+    } catch (error) {
+        console.error('❌ POST /smart-query error:', error);
+        res.status(500).json({ error: error.message });
     }
-
-    const { question, objectHint } = req.body;
-    if (!question) {
-      return res.status(400).json({ error: 'question is required' });
-    }
-
-    // Step 1: Generate SOQL
-    const soqlRes = await fetch(`http://localhost:${PORT}/generate-soql`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question, objectHint })
-    });
-    const soqlData = await soqlRes.json();
-
-    if (soqlData.needsClarification) {
-      return res.json(soqlData);
-    }
-
-    // Step 2: Execute query
-    const queryResult = await query(soqlData.soql);
-
-    // Step 3: Get explanation from LLM
-    const llmRes = await fetch(`${NVIDIA_API_BASE}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${NVIDIA_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: NVIDIA_MODEL,
-        messages: [{
-          role: 'user',
-          content: `Question: "${question}"\nSOQL: ${soqlData.soql}\nResults: ${JSON.stringify(queryResult.records.slice(0, 5))}\n\nProvide a clear explanation.`
-        }],
-        temperature: 0.7,
-        max_tokens: 512
-      })
-    });
-
-    const llmData = await llmRes.json();
-
-    res.json({
-      question,
-      soql: soqlData.soql,
-      data: queryResult,
-      explanation: llmData.choices[0].message.content,
-      recordCount: queryResult.totalSize
-    });
-
-  } catch (error) {
-    console.error('❌ POST /smart-query error:', error);
-    res.status(500).json({ error: error.message });
-  }
 });
 
 app.post('/chat', async (req, res) => {
