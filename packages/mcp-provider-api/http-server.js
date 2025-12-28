@@ -593,49 +593,36 @@ app.post('/smart-query', async (req, res) => {
         }
 
         // --- BRANCH C: Deep Data Thinking (Fetch + Query) ---
-        if (decision.startsWith('FETCH:')) {
-            const targetObject = decision.replace('FETCH:', '').trim();
-            console.log(`📡 Agent fetching fields for: ${targetObject}`);
+        if (decision.startsWith('CLARIFY:')) {
+          const potentialObjects = decision.replace('CLARIFY:', '').split(',').map(s => s.trim());
+          const confirmedObjects = [];
 
-            // Generate SOQL (this will trigger getObjectSchema internally in your generate-soql logic)
-            const soqlRes = await fetch(`http://localhost:${PORT}/generate-soql`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ question, objectHint: targetObject })
-            });
+          // "Deep Thinking" step: Check if the record actually exists in these objects
+          for (const obj of potentialObjects) {
+              const checkResult = await query(`SELECT Id FROM ${obj} WHERE Name LIKE '%Tesla%' OR Name = 'Tesla' LIMIT 1`);
+              if (checkResult.totalSize > 0) {
+                  confirmedObjects.push(obj);
+              }
+          }
 
-            const soqlData = await soqlRes.json();
-            if (soqlData.needsClarification) return res.json(soqlData);
+          // If it only exists in ONE place, auto-pivot to Branch C (FETCH)
+          if (confirmedObjects.length === 1) {
+              console.log(`🎯 Auto-resolved: Record only exists in ${confirmedObjects[0]}`);
+              return await handleFetchBranch(confirmedObjects[0], req, res); 
+          }
 
-            // Execute Query
-            const queryResult = await query(soqlData.soql);
+          // If it exists in zero places, give a friendly "Not Found" answer
+          if (confirmedObjects.length === 0) {
+              return res.json({ explanation: "I couldn't find any Account or Contact named 'Tesla'." });
+          }
 
-            // Final Summary Explanation
-            const summaryRes = await fetch(`${NVIDIA_API_BASE}/chat/completions`, {
-                method: 'POST',
-                headers: {
-                    'Authorization': `Bearer ${NVIDIA_API_KEY}`,
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    model: NVIDIA_MODEL,
-                    messages: [{
-                        role: 'user',
-                        content: `User Question: "${question}"\nData Found: ${JSON.stringify(queryResult.records.slice(0, 5))}\n\nProvide a natural language summary of the results.`
-                    }],
-                    temperature: 0.5
-                })
-            });
-
-            const summaryData = await summaryRes.json();
-
-            return res.json({
-                question,
-                soql: soqlData.soql,
-                data: queryResult,
-                explanation: summaryData.choices[0].message.content,
-                type: 'data_query'
-            });
+          // Only clarify if it REALLY exists in both places
+          return res.json({
+              question,
+              needsClarification: true,
+              options: confirmedObjects,
+              type: 'clarification'
+          });
         }
 
         // Fallback if the LLM format is weird
