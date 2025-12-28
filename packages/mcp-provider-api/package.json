@@ -7,9 +7,9 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.1",
+    "@modelcontextprotocol/server-sse": "^0.1.0",
     "express": "^4.18.2",
     "jsforce": "^1.11.1",
-    "node-fetch": "^3.3.2",
     "zod": "^3.22.4"
   }
 }
