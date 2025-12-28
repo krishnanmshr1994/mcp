@@ -170,23 +170,21 @@ async function getOrgSchema() {
 
   console.log('📥 Fetching fresh schema from Salesforce...');
   
-  const soql = 'SELECT QualifiedApiName, Label, IsCustom FROM EntityDefinition WHERE IsCustomizable = true ORDER BY IsCustom DESC, QualifiedApiName LIMIT 200';
+  const soql = 'SELECT QualifiedApiName, Label FROM EntityDefinition WHERE IsCustomizable = true ORDER BY QualifiedApiName LIMIT 50000';
   const result = await query(soql);
   
   const objects = { standard: [], custom: [] };
   
   if (result && result.records) {
     result.records.forEach(obj => {
+      const isCustom = obj.QualifiedApiName.endsWith('__c');
       const info = {
         apiName: obj.QualifiedApiName,
         label: obj.Label,
-        isCustom: obj.IsCustom
+        isCustom: isCustom
       };
-      if (obj.IsCustom) {
-        objects.custom.push(info);
-      } else {
-        objects.standard.push(info);
-      }
+      if (isCustom) objects.custom.push(info);
+      else objects.standard.push(info);
     });
   }
 
