@@ -1,5 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js"; // Corrected export name
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import express from "express";
 import { z } from "zod";
 import jsforce from 'jsforce';
@@ -10,12 +10,12 @@ const server = new McpServer({
     version: "1.0.0"
 });
 
-// 2. Salesforce Connection Helper
+// 2. Salesforce Connection Helper (Using your Exact Env Vars)
 async function getSFConnection() {
-    if (process.env.SF_ACCESS_TOKEN && process.env.SF_INSTANCE_URL) {
+    if (process.env.SALESFORCE_ACCESS_TOKEN && process.env.SALESFORCE_INSTANCE_URL) {
         return new jsforce.Connection({
-            instanceUrl: process.env.SF_INSTANCE_URL,
-            accessToken: process.env.SF_ACCESS_TOKEN
+            instanceUrl: process.env.SALESFORCE_INSTANCE_URL,
+            accessToken: process.env.SALESFORCE_ACCESS_TOKEN
         });
     }
     const conn = new jsforce.Connection({
@@ -54,10 +54,7 @@ server.tool("general_chat", { prompt: z.string() }, async ({ prompt }) => {
     const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${process.env.NVIDIA_API_KEY}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-            model: process.env.NVIDIA_MODEL || 'meta/llama-3.3-70b-instruct', 
-            messages: [{ role: 'user', content: prompt }] 
-        })
+        body: JSON.stringify({ model: process.env.NVIDIA_MODEL || 'meta/llama-3.3-70b-instruct', messages: [{ role: 'user', content: prompt }] })
     });
     const data = await response.json();
     return { content: [{ type: "text", text: data.choices[0].message.content }] };
@@ -69,34 +66,29 @@ server.tool("general_chat", { prompt: z.string() }, async ({ prompt }) => {
 const app = express();
 app.use(express.json({ limit: '5mb' }));
 
-// Lookup for multiple simultaneous connections
 const transports = new Map();
 
 app.get("/sse", async (req, res) => {
-    // Specify the relative endpoint for messages
     const transport = new SSEServerTransport("/messages", res);
     transports.set(transport.sessionId, transport);
-    
-    // Clean up when the connection closes
     res.on("close", () => {
         transports.delete(transport.sessionId);
     });
-
     await server.connect(transport);
 });
 
 app.post("/messages", async (req, res) => {
     const sessionId = req.query.sessionId;
     const transport = transports.get(sessionId);
-
     if (transport) {
         await transport.handlePostMessage(req, res);
     } else {
-        res.status(400).send("Session not found. Connect to /sse first.");
+        res.status(400).send("Session not found.");
     }
 });
 
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => {
+// CRITICAL FIX: Bind to 0.0.0.0
+app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Salesforce MCP Detective LIVE on port ${PORT}`);
 });
