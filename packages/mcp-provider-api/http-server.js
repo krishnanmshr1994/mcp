@@ -532,71 +532,104 @@ Otherwise, respond ONLY with the valid SOQL query (no markdown, no explanations,
 });
 
 app.post('/smart-query', async (req, res) => {
-    const { question } = req.body;
-    let context = []; // Stores thoughts, queries, and results of each turn
-    let turns = 0;
-    const MAX_TURNS = 3;
-
+    console.log('🔍 POST /smart-query (Agentic) called');
     try {
-        while (turns < MAX_TURNS) {
-            // STEP 1: REASONING - LLM decides what to check
-            const orchestratorRes = await fetch(`${NVIDIA_API_BASE}/chat/completions`, {
-                method: 'POST',
-                headers: { 'Authorization': `Bearer ${NVIDIA_API_KEY}`, 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    model: NVIDIA_MODEL,
-                    messages: [
-                        { role: 'system', content: `You are a Salesforce Forensic Investigator.
-                        TOOLS:
-                        - SOSL_SEARCH: Find records when object is unclear (e.g. FIND {Name}...).
-                        - METADATA_QUERY: Check logic (SELECT Body FROM ApexTrigger, SELECT Description FROM FlowDefinition, etc).
-                        - DATA_QUERY: Get specific records.
-
-                        STRATEGY:
-                        1. If investigating "how" or "why", query Metadata tables (ApexTrigger, ValidationRule, FlowDefinition).
-                        2. If searching for a name like "Tesla", use SOSL_SEARCH across Account, Contact, Lead first.
-                        3. If you have enough info, respond with ANSWER: [Result].
-
-                        RESPONSE FORMAT (JSON): { "type": "ACTION|ANSWER", "tool": "SOSL_SEARCH|METADATA_QUERY|DATA_QUERY", "input": "query string", "content": "final answer" }` },
-                        ...context.map(c => ({ role: 'assistant', content: `Action: ${c.action}, Result: ${JSON.stringify(c.observation)}` })),
-                        { role: 'user', content: question }
-                    ],
-                    response_format: { type: "json_object" }
-                })
-            });
-
-            const decision = JSON.parse((await orchestratorRes.json()).choices[0].message.content);
-
-            // BRANCH A: INVESTIGATION COMPLETE
-            if (decision.type === 'ANSWER') {
-                return res.json({ 
-                    question, 
-                    explanation: decision.content, 
-                    stepsTaken: context.length 
-                });
-            }
-
-            // BRANCH B: PERFORM ACTION (The "Detective" work)
-            console.log(`🕵️ Turn ${turns+1}: Executing ${decision.tool}`);
-            let observation;
-            const conn = await getConnection();
-
-            if (decision.tool === 'SOSL_SEARCH') {
-                observation = await conn.search(decision.input);
-            } else if (decision.tool === 'METADATA_QUERY') {
-                observation = await conn.tooling.query(decision.input);
-            } else {
-                observation = await conn.query(decision.input);
-            }
-
-            // Add this turn to context and loop back for "Deep Thinking"
-            context.push({ action: decision.input, observation });
-            turns++;
+        if (!NVIDIA_API_KEY) {
+            return res.status(503).json({ error: 'LLM not configured' });
         }
 
-        res.json({ explanation: "Investigation timed out. Here is what I found so far: " + JSON.stringify(context) });
+        const { question } = req.body;
+        if (!question) {
+            return res.status(400).json({ error: 'question is required' });
+        }
+
+        // 1. Get current Object list for context
+        const schema = await getOrgSchema();
+        const objectList = [...schema.standard, ...schema.custom].map(o => `${o.apiName} (${o.label})`).join(', ');
+
+        // 2. Step 1: Orchestration - Decide the path
+        const orchestratorRes = await fetch(`${NVIDIA_API_BASE}/chat/completions`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${NVIDIA_API_KEY}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                model: NVIDIA_MODEL,
+                messages: [{
+                    role: 'system',
+                    content: `You are a Salesforce Orchestrator. Available Objects: ${objectList}.
+                    Based on the question, respond with ONE of these formats:
+                    - 'FETCH: [ObjectAPIName]' if you need fields to query records or explain structure.
+                    - 'CLARIFY: [Obj1], [Obj2]' if the entity (e.g., Tesla) exists in multiple objects.
+                    - 'ANSWER: [Response]' for general knowledge, troubleshooting advice (access/permissions), or simple help.`
+                }, { role: 'user', content: question }],
+                temperature: 0.1
+            })
+        });
+
+        const orchData = await orchestratorRes.json();
+        const decision = orchData.choices[0].message.content.trim();
+        console.log(`🤖 Orchestrator Decision: ${decision}`);
+
+        // --- BRANCH A: Direct Answer (General/Troubleshooting) ---
+        if (decision.startsWith('ANSWER:')) {
+            return res.json({
+                question,
+                explanation: decision.replace('ANSWER:', '').trim(),
+                type: 'general'
+            });
+        }
+
+        // --- BRANCH B: Ambiguity Handling ---
+        if (decision.startsWith('CLARIFY:')) {
+            const options = decision.replace('CLARIFY:', '').split(',').map(s => s.trim());
+            return res.json({
+                question,
+                needsClarification: true,
+                options,
+                type: 'clarification'
+            });
+        }
+
+        // --- BRANCH C: Deep Data Thinking (Fetch + Query) ---
+        if (decision.startsWith('CLARIFY:')) {
+          const potentialObjects = decision.replace('CLARIFY:', '').split(',').map(s => s.trim());
+          const confirmedObjects = [];
+
+          // "Deep Thinking" step: Check if the record actually exists in these objects
+          for (const obj of potentialObjects) {
+              const checkResult = await query(`SELECT Id FROM ${obj} WHERE Name LIKE '%Tesla%' OR Name = 'Tesla' LIMIT 1`);
+              if (checkResult.totalSize > 0) {
+                  confirmedObjects.push(obj);
+              }
+          }
+
+          // If it only exists in ONE place, auto-pivot to Branch C (FETCH)
+          if (confirmedObjects.length === 1) {
+              console.log(`🎯 Auto-resolved: Record only exists in ${confirmedObjects[0]}`);
+              return await handleFetchBranch(confirmedObjects[0], req, res); 
+          }
+
+          // If it exists in zero places, give a friendly "Not Found" answer
+          if (confirmedObjects.length === 0) {
+              return res.json({ explanation: "I couldn't find any Account or Contact named 'Tesla'." });
+          }
+
+          // Only clarify if it REALLY exists in both places
+          return res.json({
+              question,
+              needsClarification: true,
+              options: confirmedObjects,
+              type: 'clarification'
+          });
+        }
+
+        // Fallback if the LLM format is weird
+        throw new Error("Unexpected orchestrator response format");
 
     } catch (error) {
+        console.error('❌ POST /smart-query error:', error);
         res.status(500).json({ error: error.message });
     }
 });
