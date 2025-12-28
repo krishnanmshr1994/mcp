@@ -57,8 +57,10 @@ server.tool("investigate_org_logic",
         const conn = await getSFConnection();
         // Accesses the 'Architect' layer of Salesforce
         const res = await conn.tooling.query(toolingSoql);
-        return { content: [{ type: "text", text: JSON.stringify(res.records) }] };
-    }
+        // jsforce 1.x sometimes wraps records differently, so we ensure it's clean
+        const records = res.records || res; 
+        return { content: [{ type: "text", text: JSON.stringify(records) }] };
+        }
 );
 
 // ============================================
