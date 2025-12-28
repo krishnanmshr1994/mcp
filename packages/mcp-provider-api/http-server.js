@@ -1,9 +1,8 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/index.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import express from "express";
 import { z } from "zod";
 import jsforce from 'jsforce';
-
 // 1. Initialize MCP Server
 const server = new McpServer({
     name: "salesforce-mcp-detective",
