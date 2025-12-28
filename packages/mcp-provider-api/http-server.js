@@ -148,7 +148,7 @@ async function getOrgSchema() {
 
   console.log('🔍 [getOrgSchema] Cache miss or expired, fetching fresh...');
   
-  const soql = 'SELECT QualifiedApiName, Label, IsCustom FROM EntityDefinition WHERE IsCustomizable = true ORDER BY IsCustom DESC LIMIT 200';
+  const soql = 'SELECT QualifiedApiName, Label FROM EntityDefinition WHERE IsCustomizable = true ORDER BY QualifiedApiName LIMIT 50000';
   console.log('🔍 [getOrgSchema] About to call query()...');
   
   const result = await query(soql);
@@ -161,9 +161,9 @@ async function getOrgSchema() {
       const info = {
         apiName: obj.QualifiedApiName,
         label: obj.Label,
-        isCustom: obj.IsCustom
+        isCustom: obj.QualifiedApiName.endsWith('__c')
       };
-      if (obj.IsCustom) objects.custom.push(info);
+      if (obj.QualifiedApiName.endsWith('__c')) objects.custom.push(info);
       else objects.standard.push(info);
     });
   }
